@@ -1,0 +1,5 @@
+# .clangd
+CompileFlags:
+  Add:
+    - -I/home/boxfish/lib/edk2/MdePkg/Include/
+    - -I/home/boxfish/lib/edk2/MdePkg/Include/X64/

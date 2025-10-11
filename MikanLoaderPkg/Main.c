@@ -1,14 +1,22 @@
-#include <Guid/FileInfo.h>
-#include <Library/PrintLib.h>
-#include <Library/UefiBootServicesTableLib.h>
+// clang-format off
+#include <Uefi.h>
 #include <Library/UefiLib.h>
-#include <Protocol/BlockIo.h>
-#include <Protocol/DiskIo2.h>
+#include <Library/UefiBootServicesTableLib.h>
+#include <Library/MemoryAllocationLib.h>
+#include <Library/PrintLib.h>
+#include <Library/MemoryAllocationLib.h>
+#include <Library/BaseMemoryLib.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleFileSystem.h>
-#include <Uefi.h>
+#include <Protocol/DiskIo2.h>
+#include <Protocol/BlockIo.h>
+#include <Guid/FileInfo.h>
+#include "../kernel/frame_buffer_config.hpp"
+#include "../kernel/elf.hpp"
+#include "Base.h"
+#include "ProcessorBind.h"
+// clang-format off
 
-// #@@range_begin(struct_memory_map)
 struct MemoryMap {
   UINTN buffer_size;
   VOID *buffer;
@@ -17,9 +25,7 @@ struct MemoryMap {
   UINTN descriptor_size;
   UINT32 descriptor_version;
 };
-// #@@range_end(struct_memory_map)
 
-// #@@range_begin(get_memory_map)
 EFI_STATUS GetMemoryMap(struct MemoryMap *map) {
   if (map->buffer == NULL) {
     return EFI_BUFFER_TOO_SMALL;
@@ -30,9 +36,7 @@ EFI_STATUS GetMemoryMap(struct MemoryMap *map) {
                            &map->map_key, &map->descriptor_size,
                            &map->descriptor_version);
 }
-// #@@range_end(get_memory_map)
 
-// #@@range_begin(get_memory_type)
 const CHAR16 *GetMemoryTypeUnicode(EFI_MEMORY_TYPE type) {
   switch (type) {
   case EfiReservedMemoryType:
@@ -71,9 +75,7 @@ const CHAR16 *GetMemoryTypeUnicode(EFI_MEMORY_TYPE type) {
     return L"InvalidMemoryType";
   }
 }
-// #@@range_end(get_memory_type)
 
-// #@@range_begin(save_memory_map)
 EFI_STATUS SaveMemoryMap(struct MemoryMap *map, EFI_FILE_PROTOCOL *file) {
   CHAR8 buf[256];
   UINTN len;
@@ -83,7 +85,7 @@ EFI_STATUS SaveMemoryMap(struct MemoryMap *map, EFI_FILE_PROTOCOL *file) {
   len = AsciiStrLen(header);
   file->Write(file, &len, header);
 
-  Print(L"map->buffer = %081x, map->map_size = %08lx\n", map->buffer,
+  Print(L"map->buffer = %08lx, map->map_size = %08lx\n", map->buffer,
         map->map_size);
 
   EFI_PHYSICAL_ADDRESS iter;
@@ -101,7 +103,6 @@ EFI_STATUS SaveMemoryMap(struct MemoryMap *map, EFI_FILE_PROTOCOL *file) {
 
   return EFI_SUCCESS;
 }
-// #@@range_end(save_memory_map)
 
 EFI_STATUS OpenRootDir(EFI_HANDLE image_handle, EFI_FILE_PROTOCOL **root) {
   EFI_LOADED_IMAGE_PROTOCOL *loaded_image;
@@ -120,11 +121,73 @@ EFI_STATUS OpenRootDir(EFI_HANDLE image_handle, EFI_FILE_PROTOCOL **root) {
   return EFI_SUCCESS;
 }
 
+EFI_STATUS OpenGOP(EFI_HANDLE image_handle,
+                   EFI_GRAPHICS_OUTPUT_PROTOCOL **gop) {
+  UINTN num_gop_handles = 0;
+  EFI_HANDLE *gop_handles = NULL;
+  gBS->LocateHandleBuffer(ByProtocol, &gEfiGraphicsOutputProtocolGuid, NULL,
+                          &num_gop_handles, &gop_handles);
+
+  gBS->OpenProtocol(gop_handles[0], &gEfiGraphicsOutputProtocolGuid,
+                    (VOID **)gop, image_handle, NULL,
+                    EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+
+  FreePool(gop_handles);
+
+  return EFI_SUCCESS;
+}
+
+const CHAR16 *GetPixelFormatUnicode(EFI_GRAPHICS_PIXEL_FORMAT fmt) {
+  switch (fmt) {
+  case PixelRedGreenBlueReserved8BitPerColor:
+    return L"PixelRedGreenBlueReserved8BitPerColor";
+  case PixelBlueGreenRedReserved8BitPerColor:
+    return L"PixelBlueGreenRedReserved8BitPerColor";
+  case PixelBitMask:
+    return L"PixelBitMask";
+  case PixelBltOnly:
+    return L"PixelBltOnly";
+  case PixelFormatMax:
+    return L"PixelFormatMax";
+  default:
+    return L"InvalidPixelFormat";
+  }
+}
+
+void Halt(void) {
+  while(1) __asm__("hlt");
+}
+
+// #@@range_begin(calc_addr_func)
+void CalcLoadAddressRange(Elf64_Ehdr* ehdr, UINT64* first, UINT64* last) {
+  Elf64_Phdr* phdr = (Elf64_Phdr*)((UINT64) ehdr + ehdr->e_phoff);
+  *first = MAX_UINT64;
+  *last = 0;
+  for(Elf64_Half i = 0; i < ehdr->e_phnum; ++i) {
+if (phdr[i].p_type != PT_LOAD)continue;
+    *first = MIN(*first, phdr[i].p_vaddr);
+    *last = MAX(*last, phdr[i].p_vaddr + phdr[i].p_memsz);
+  }
+}
+// #@@range_end(calc_addr_func)
+
+
+// #@@range_begin(copy_segm_func)
+void CopyLoadSegments(Elf64_Ehdr* ehdr) {
+  Elf64_Phdr *phdr = (Elf64_Phdr*)((UINT64)ehdr + ehdr->e_phoff);
+  for(Elf64_Half i = 0; i < ehdr->e_phnum; ++i) {
+    if (phdr[i].p_type != PT_LOAD) continue;
+
+    UINT64 segm_in_file = (UINT64)ehdr + phdr[i].p_offset;
+    CopyMem((VOID*)phdr[i].p_vaddr, (VOID*)segm_in_file, phdr[i].p_filesz);
+  }
+}
+// #@@range_end(copy_segm_func)
+
 EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle,
                            EFI_SYSTEM_TABLE *system_table) {
   Print(L"Hello, Mikan World!\n");
 
-  // #@@range_begin(main)
   CHAR8 memmap_buf[4096 * 4];
   struct MemoryMap memmap = {sizeof(memmap_buf), memmap_buf, 0, 0, 0, 0};
   GetMemoryMap(&memmap);
@@ -139,11 +202,26 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle,
 
   SaveMemoryMap(&memmap, memmap_file);
   memmap_file->Close(memmap_file);
-  // #@@range_end(main)
 
-  // #@@range_begin(read_kernel)
+  EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
+  OpenGOP(image_handle, &gop);
+  Print(L"Resolution: %ux%u, Pixel Format: %s, %u pixels/line\n",
+        gop->Mode->Info->HorizontalResolution,
+        gop->Mode->Info->VerticalResolution,
+        GetPixelFormatUnicode(gop->Mode->Info->PixelFormat),
+        gop->Mode->Info->PixelsPerScanLine);
+  Print(L"Frame Buffer: 0x%0lx - 0x%0lx, Size: %lu bytes\n",
+        gop->Mode->FrameBufferBase,
+        gop->Mode->FrameBufferBase + gop->Mode->FrameBufferSize,
+        gop->Mode->FrameBufferSize);
+
+  UINT8 *frame_buffer = (UINT8 *)gop->Mode->FrameBufferBase;
+  for (UINTN i = 0; i < gop->Mode->FrameBufferSize; ++i) {
+    frame_buffer[i] = 255;
+  }
+
   EFI_FILE_PROTOCOL *kernel_file;
-  root_dir->Open(root_dir, &kernel_file, L"\\Kernel.elf", EFI_FILE_MODE_READ,
+  root_dir->Open(root_dir, &kernel_file, L"\\kernel.elf", EFI_FILE_MODE_READ,
                  0);
 
   UINTN file_info_size = sizeof(EFI_FILE_INFO) + sizeof(CHAR16) * 12;
@@ -151,15 +229,31 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle,
   kernel_file->GetInfo(kernel_file, &gEfiFileInfoGuid, &file_info_size,
                        file_info_buffer);
 
+  // #@@range_begin(read_kernel)
   EFI_FILE_INFO *file_info = (EFI_FILE_INFO *)file_info_buffer;
   UINTN kernel_file_size = file_info->FileSize;
 
-  EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000;
-  gBS->AllocatePages(AllocateAddress, EfiLoaderData,
-                     (kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);
-  kernel_file->Read(kernel_file, &kernel_file_size, (VOID *)kernel_base_addr);
-  Print(L"Kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);
+  VOID *kernel_buffer;
+  gBS->AllocatePool(EfiLoaderData, kernel_file_size, &kernel_buffer);
+  kernel_file->Read(kernel_file, &kernel_file_size, kernel_buffer);
   // #@@range_end(read_kernel)
+
+  // #@@range_begin(alloc_pages)
+  Elf64_Ehdr *kernel_ehdr = (Elf64_Ehdr *)kernel_buffer;
+  UINT64 kernel_first_addr, kernel_last_addr;
+  CalcLoadAddressRange(kernel_ehdr, &kernel_first_addr, &kernel_last_addr);
+
+  UINTN num_pages = (kernel_last_addr - kernel_first_addr + 0xfff) / 0x1000;
+  gBS->AllocatePages(AllocateAddress, EfiLoaderData, num_pages,
+                      &kernel_first_addr);
+  // #@@range_end(alloc_pages)
+
+  // #@@range_begin(copy_segments)
+  CopyLoadSegments(kernel_ehdr);
+  Print(L"Kernel:0x%0lx - 0x%olx\n", kernel_first_addr, kernel_last_addr);
+
+  gBS->FreePool(kernel_buffer);
+  // #@@range_end(copy_segments)
 
   // #@@range_begin(exit_bs)
   EFI_STATUS status;
@@ -168,25 +262,25 @@ EFI_STATUS EFIAPI UefiMain(EFI_HANDLE image_handle,
     status = GetMemoryMap(&memmap);
     if (EFI_ERROR(status)) {
       Print(L"failed to get memory map: %r\n", status);
-      while (1)
-        ;
+      Halt();
     }
     status = gBS->ExitBootServices(image_handle, memmap.map_key);
     if (EFI_ERROR(status)) {
       Print(L"Could not exit boot service: %r\n", status);
-      while (1)
-        ;
+      Halt();
     }
   }
   // #@@range_end(exit_bs)
 
-  // #@@range_begin(call_kernel)
-  UINT64 entry_addr = *(UINT64 *)(kernel_base_addr + 24);
+  // #@@range_begin(get_entry_point)
+  UINT64 entry_addr = *(UINT64 *)(kernel_first_addr + 24);
+  // #@@range_end(get_entry_point)
 
-  typedef void EntryPointType(void);
+  // #@@range_begin(call_kernel)
+  typedef void EntryPointType(UINT64, UINT64);
   EntryPointType *entry_point = (EntryPointType *)entry_addr;
-  entry_point();
-  // #@@range_end(call_kernel);
+  entry_point(gop->Mode->FrameBufferBase, gop->Mode->FrameBufferSize);
+  // #@@range_end(call_kernel)
 
   Print(L"All done\n");
 
