@@ -1,8 +1,9 @@
 mnt
-devenv
 OVMF_VARS.fd
 disk.img
 *.elf
 *.efi
 *.o
 *.d
+*/x86_64-elf
+*.bin

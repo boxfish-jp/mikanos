@@ -1,6 +1,7 @@
 // clang-format off
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 
 // #@@range_begin(includes)
 #include "frame_buffer_config.hpp"
@@ -34,7 +35,7 @@ extern "C" void KernelMain(const FrameBufferConfig &frame_buffer_config) {
 
   for (int x = 0; x < frame_buffer_config.horizontal_resolution; ++x) {
     for (int y = 0; y < frame_buffer_config.vertical_resolution; ++y) {
-      pixel_writer->Write(x, y, {0, 0, 0});
+      pixel_writer->Write(x, y, {255, 255, 255});
     }
   }
   for (int x = 0; x < 200; ++x) {
@@ -43,9 +44,18 @@ extern "C" void KernelMain(const FrameBufferConfig &frame_buffer_config) {
     }
   }
 
-  // #@@range_begin(write_aa)
-  WriteAscii(*pixel_writer, 50, 50, 'A', {0, 0, 0});
-  WriteAscii(*pixel_writer, 58, 50, 'A', {0, 0, 0});
+  // #@@range_begin(write_fonts)
+  int i = 0;
+  for (char c = '!'; c <= '~'; ++c, ++i) {
+    WriteAscii(*pixel_writer, 8 * i, 50, c, {0, 0, 0});
+  }
+  WriteString(*pixel_writer, 0, 0, "Hello, world!", {0, 0, 0});
+  // #@@range_end(write_fonts)
+  //
+  // #@@range_begin(sprintf)
+  char buf[128];
+  sprintf(buf, "1 + 2 = %d", 1 + 2);
+  WriteString(*pixel_writer, 0, 82, buf, {0, 0, 0});
   while (1)
     __asm__("hlt");
 }
